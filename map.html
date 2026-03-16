@@ -1,0 +1,417 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Route Planner</title>
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <style>
+        html, body, #map {
+            height: 100%;
+            margin: 0;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="map"></div>
+
+    <script>
+
+        // ============================================================
+        // MAP SETUP
+        // ============================================================
+
+        var map = L.map('map').setView([39.6, -8.8], 8);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+
+        // ============================================================
+        // STATE
+        // All active layers are tracked here so we can clean them up.
+        // ============================================================
+
+        var routeLayer = null;   // the drawn polyline
+        var moradaMarker = null;   // the fixed origin pin (set by jumpToAddress / setMoradaMarker)
+        var stopMarkers = [];     // array of Leaflet markers for the multi-stop list
+        var isBusy = false;  // prevents races between async calls
+
+
+        // ============================================================
+        // INTERNAL HELPERS
+        // ============================================================
+
+        // Remove the route polyline from the map.
+        function _clearRouteLayer() {
+            if (routeLayer) {
+                try { map.removeLayer(routeLayer); } catch (e) { }
+                routeLayer = null;
+            }
+        }
+
+        // Remove all stop markers (does NOT touch moradaMarker).
+        function _clearStopMarkers() {
+            stopMarkers.forEach(function (m) {
+                try { map.removeLayer(m); } catch (e) { }
+            });
+            stopMarkers = [];
+        }
+
+        // Remove the origin (morada) marker.
+        function _clearMoradaMarker() {
+            if (moradaMarker) {
+                try { map.removeLayer(moradaMarker); } catch (e) { }
+                moradaMarker = null;
+            }
+        }
+
+        // Geocode a plain-text address using Nominatim.
+        // Returns { lat, lon, displayName } or null on failure.
+        async function _geocode(address) {
+            var coordMatch = address.toString().trim().match(/^(-?\d+(\.\d+)?)[,\s]+(-?\d+(\.\d+)?)$/);
+            if (coordMatch) {
+                return {
+                    lat: parseFloat(coordMatch[1]),
+                    lon: parseFloat(coordMatch[3]),
+                    displayName: address
+                };
+            }
+
+            var maxAttempts = 3;
+            for (var attempt = 0; attempt < maxAttempts; attempt++) {
+                try {
+                    var url = 'https://nominatim.openstreetmap.org/search'
+                        + '?q=' + encodeURIComponent(address)
+                        + '&format=json&limit=5&addressdetails=1&email=customerrouteplanner@example.com';
+
+                    var resp = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+                    if (!resp.ok) throw new Error('Nominatim HTTP ' + resp.status);
+
+                    var results = await resp.json();
+                    if (!results || results.length === 0) {
+                        console.warn('No geocoding results for', address);
+                        return null;
+                    }
+
+                    // Prefer country/administrative results when available (same logic as before)
+                    var chosen = results.find(function (r) { return r.type === 'country'; })
+                        || results.find(function (r) { return r.class === 'boundary' && r.type === 'administrative'; })
+                        || results[0];
+
+                    return {
+                        lat: parseFloat(chosen.lat),
+                        lon: parseFloat(chosen.lon),
+                        displayName: chosen.display_name || address
+                    };
+                } catch (err) {
+                    console.error('_geocode error', { message: err.message, attempt: attempt + 1 });
+                    if (attempt < maxAttempts - 1) {
+                        await new Promise(function (r) { setTimeout(r, 200 * Math.pow(2, attempt)); });
+                    }
+                }
+            }
+            return null;
+        }
+
+        // Fetch a driving route from OSRM for an ordered list of waypoints.
+        // waypoints: array of { lat, lon }
+        // Returns a GeoJSON geometry, or null on failure.
+        async function _fetchRoute(waypoints) {
+            // OSRM coordinate string: "lon,lat;lon,lat;..."
+            var coords = waypoints.map(function (w) {
+                return w.lon + ',' + w.lat;
+            }).join(';');
+
+            var url = 'https://router.project-osrm.org/route/v1/driving/'
+                + coords
+                + '?overview=full&geometries=geojson';
+
+            var resp = await fetch(url);
+            if (!resp.ok) {
+                console.warn('OSRM request failed', resp.status);
+                return null;
+            }
+            var data = await resp.json();
+            if (!data.routes || data.routes.length === 0) return null;
+            return data.routes[0].geometry;
+        }
+
+        // Nearest-neighbour TSP heuristic.
+        // Takes an array of { lat, lon, ... } and returns a reordered copy
+        // that visits every stop with a short total path, starting from index 0.
+        function _nearestNeighbourSort(stops) {
+            if (stops.length <= 2) return stops.slice();
+
+            // Simple Euclidean distance (good enough for routing distances in a small region)
+            function dist(a, b) {
+                var dlat = a.lat - b.lat;
+                var dlon = a.lon - b.lon;
+                return Math.sqrt(dlat * dlat + dlon * dlon);
+            }
+
+            var remaining = stops.slice(1);            // everything except the fixed origin
+            var ordered = [stops[0]];              // start from origin
+
+            while (remaining.length > 0) {
+                var current = ordered[ordered.length - 1];
+                var bestIdx = 0;
+                var bestDist = Infinity;
+
+                for (var i = 0; i < remaining.length; i++) {
+                    var d = dist(current, remaining[i]);
+                    if (d < bestDist) {
+                        bestDist = d;
+                        bestIdx = i;
+                    }
+                }
+
+                ordered.push(remaining[bestIdx]);
+                remaining.splice(bestIdx, 1);
+            }
+
+            return ordered;
+        }
+
+
+        // ============================================================
+        // MULTI-STOP ROUTING  (the new core API)
+        // ============================================================
+
+        /*
+         * drawRouteOrdered(stops)
+         *
+         * Draws a route through the stops in the exact order provided.
+         *
+         * stops: array of objects, each with at least one of:
+         *   { lat, lon, label }   ← already geocoded coordinates
+         *   { address, label }    ← will be geocoded here
+         *
+         * The first stop is treated as the origin (replaces moradaMarker).
+         * All subsequent stops get numbered markers on the map.
+         *
+         * Called from C# like:
+         *   window.drawRouteOrdered(JSON.stringify(stopsArray))
+         */
+        async function drawRouteOrdered(stopsJson) {
+            await _runRouting(stopsJson, false);
+        }
+
+        /*
+         * drawRouteOptimal(stops)
+         *
+         * Same as drawRouteOrdered but reorders the stops (after the first)
+         * using a nearest-neighbour heuristic to minimise total travel distance.
+         *
+         * Called from C# like:
+         *   window.drawRouteOptimal(JSON.stringify(stopsArray))
+         */
+        async function drawRouteOptimal(stopsJson) {
+            await _runRouting(stopsJson, true);
+        }
+
+        // Shared implementation for both ordered and optimal routing.
+        async function _runRouting(stopsJson, optimise) {
+            isBusy = true;
+            _clearRouteLayer();
+            _clearStopMarkers();
+            _clearMoradaMarker();
+
+            try {
+                // Accept either a JSON string (from C#) or a plain JS array.
+                var stops = typeof stopsJson === 'string' ? JSON.parse(stopsJson) : stopsJson;
+
+                if (!stops || stops.length === 0) {
+                    console.warn('drawRoute: no stops provided');
+                    return;
+                }
+
+                // --- Step 1: Geocode any stops that don't have coordinates yet ---
+                var waypoints = [];
+                for (var i = 0; i < stops.length; i++) {
+                    var s = stops[i];
+                    if (s.lat != null && s.lon != null) {
+                        waypoints.push({ lat: s.lat, lon: s.lon, label: s.label || s.address || ('Stop ' + (i + 1)) });
+                    } else if (s.address) {
+                        var geo = await _geocode(s.address);
+                        if (!geo) {
+                            console.warn('Could not geocode stop', s.address);
+                            continue;
+                        }
+                        waypoints.push({ lat: geo.lat, lon: geo.lon, label: s.label || s.address });
+                    } else {
+                        console.warn('Stop has neither coordinates nor address', s);
+                    }
+                }
+
+                if (waypoints.length === 0) {
+                    console.warn('No valid waypoints after geocoding');
+                    return;
+                }
+
+                // --- Step 2: Optionally reorder to find a shorter path ---
+                if (optimise && waypoints.length > 2) {
+                    waypoints = _nearestNeighbourSort(waypoints);
+                }
+
+                // --- Step 3: Draw the route (if 2+ waypoints) ---
+                if (waypoints.length >= 2) {
+                    var geometry = await _fetchRoute(waypoints);
+                    if (geometry) {
+                        routeLayer = L.geoJSON(geometry, {
+                            style: { color: 'royalblue', weight: 5 }
+                        }).addTo(map);
+                    }
+                }
+
+                // --- Step 4: Place markers ---
+                // Origin marker (same styling as before)
+                moradaMarker = L.marker([waypoints[0].lat, waypoints[0].lon]).addTo(map);
+                moradaMarker.bindPopup(waypoints[0].label);
+
+                // Numbered markers for all subsequent stops
+                for (var j = 1; j < waypoints.length; j++) {
+                    var w = waypoints[j];
+                    var icon = L.divIcon({
+                        className: '',
+                        html: '<div style="'
+                            + 'background:#e74c3c;color:#fff;border-radius:50%;'
+                            + 'width:26px;height:26px;line-height:26px;text-align:center;'
+                            + 'font-weight:bold;font-size:13px;font-family:sans-serif;'
+                            + 'border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4)'
+                            + '">' + j + '</div>',
+                        iconSize: [26, 26],
+                        iconAnchor: [13, 13]
+                    });
+
+                    var marker = L.marker([w.lat, w.lon], { icon: icon }).addTo(map);
+                    marker.bindPopup(w.label);
+                    stopMarkers.push(marker);
+                }
+
+                // --- Step 5: Fit the map to show everything ---
+                var allMarkers = [moradaMarker].concat(stopMarkers);
+                var group = L.featureGroup(allMarkers);
+
+                if (routeLayer && routeLayer.getBounds) {
+                    map.fitBounds(routeLayer.getBounds().pad(0.1));
+                } else {
+                    map.fitBounds(group.getBounds().pad(0.1));
+                }
+
+            } catch (err) {
+                console.error('_runRouting error', { message: err.message, stack: err.stack });
+            } finally {
+                isBusy = false;
+            }
+        }
+
+
+        // ============================================================
+        // LEGACY API  (kept so the existing C# code keeps working)
+        // ============================================================
+
+        // Used by frmRota when only an origin is set (no destination).
+        async function jumpToAddress(address) {
+            if (!address) return;
+
+            // Wait briefly if a routing call is in progress
+            var waited = 0;
+            while (isBusy && waited < 2000) {
+                await new Promise(function (r) { setTimeout(r, 100); });
+                waited += 100;
+            }
+
+            var geo = await _geocode(address);
+            if (!geo) return;
+
+            setMoradaMarker(geo.lat, geo.lon, geo.displayName);
+        }
+
+        // Used by frmRota when both origin and destination are known.
+        // Internally delegates to the new multi-stop routing engine.
+        async function drawRouteWithMarkers(lat1, lon1, lat2, lon2, moradaPopup, destPopup) {
+            await drawRouteOrdered([
+                { lat: lat1, lon: lon1, label: moradaPopup || 'Origin' },
+                { lat: lat2, lon: lon2, label: destPopup || 'Destination' }
+            ]);
+        }
+
+        // Legacy single-pair route (no markers — kept for compatibility)
+        async function drawRoute(lat1, lon1, lat2, lon2) {
+            _clearRouteLayer();
+            var geometry = await _fetchRoute([
+                { lat: lat1, lon: lon1 },
+                { lat: lat2, lon: lon2 }
+            ]);
+            if (geometry) {
+                routeLayer = L.geoJSON(geometry, {
+                    style: { color: 'red', weight: 5 }
+                }).addTo(map);
+                map.fitBounds(routeLayer.getBounds());
+            }
+        }
+
+        // Place / update the origin (morada) pin without touching anything else.
+        function setMoradaMarker(lat, lon, popupText) {
+            _clearMoradaMarker();
+            moradaMarker = L.marker([lat, lon]).addTo(map);
+            if (popupText) moradaMarker.bindPopup(popupText).openPopup();
+            map.setView([lat, lon], 16);
+        }
+
+        // Place / update a single destination pin (legacy — maps to stop index 0 of stopMarkers).
+        function setDestinationMarker(lat, lon, popupText) {
+            // Remove the first stop marker if present
+            if (stopMarkers.length > 0) {
+                try { map.removeLayer(stopMarkers[0]); } catch (e) { }
+                stopMarkers.splice(0, 1);
+            }
+            var m = L.marker([lat, lon]).addTo(map);
+            if (popupText) m.bindPopup(popupText).openPopup();
+            stopMarkers.unshift(m);
+        }
+
+        // Clear only the route polyline.
+        function clearRoute() {
+            _clearRouteLayer();
+        }
+
+        // Clear only the first stop marker (legacy "destination" concept).
+        function clearDestinationMarker() {
+            if (stopMarkers.length > 0) {
+                try { map.removeLayer(stopMarkers[0]); } catch (e) { }
+                stopMarkers.splice(0, 1);
+            }
+        }
+
+        // Clear both origin and all stop markers.
+        function clearAllAddressMarkers() {
+            _clearMoradaMarker();
+            _clearStopMarkers();
+        }
+
+
+        // ============================================================
+        // EXPOSE EVERYTHING TO THE C# HOST
+        // ============================================================
+
+        window.drawRoute = drawRoute;
+        window.drawRouteWithMarkers = drawRouteWithMarkers;
+        window.drawRouteOrdered = drawRouteOrdered;
+        window.drawRouteOptimal = drawRouteOptimal;
+        window.jumpToAddress = jumpToAddress;
+        window.clearRoute = clearRoute;
+        window.clearDestinationMarker = clearDestinationMarker;
+        window.clearAllAddressMarkers = clearAllAddressMarkers;
+        window.setMoradaMarker = setMoradaMarker;
+        window.setDestinationMarker = setDestinationMarker;
+
+    </script>
+
+</body>
+</html>
