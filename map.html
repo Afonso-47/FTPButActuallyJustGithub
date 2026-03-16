@@ -20,7 +20,73 @@
 
     <script>
 
+        // EXPOSE EVERYTHING TO THE C# HOST
         // ============================================================
+
+        window.drawRoute = drawRoute;
+        window.drawRouteWithMarkers = drawRouteWithMarkers;
+        window.drawRouteOrdered = drawRouteOrdered;
+        window.drawRouteOptimal = drawRouteOptimal;
+        window.jumpToAddress = jumpToAddress;
+        window.clearRoute = clearRoute;
+        window.clearDestinationMarker = clearDestinationMarker;
+        window.clearAllAddressMarkers = clearAllAddressMarkers;
+        window.setMoradaMarker = setMoradaMarker;
+        window.setDestinationMarker = setDestinationMarker;
+=======
+        // ============================================================
+        // EXPOSE EVERYTHING TO THE C# HOST
+        // ============================================================
+
+        window.drawRoute = drawRoute;
+        window.drawRouteWithMarkers = drawRouteWithMarkers;
+        window.drawRouteOrdered = drawRouteOrdered;
+        window.drawRouteOptimal = drawRouteOptimal;
+        window.jumpToAddress = jumpToAddress;
+        window.clearRoute = clearRoute;
+        window.clearDestinationMarker = clearDestinationMarker;
+        window.clearAllAddressMarkers = clearAllAddressMarkers;
+        window.setMoradaMarker = setMoradaMarker;
+        window.setDestinationMarker = setDestinationMarker;
+        window.onMapError = onMapError;  // Expose error handler for C# to overrideSTATE
+        // All active layers are tracked here so we can clean them up.
+        // ============================================================
+
+        var routeLayer = null;   // the drawn polyline
+        var moradaMarker = null;   // the fixed origin pin (set by jumpToAddress / setMoradaMarker)
+        var stopMarkers = [];     // array of Leaflet markers for the multi-stop list
+        var isBusy = false;  // prevents races between async calls
+=======
+        // ============================================================
+        // STATE
+        // All active layers are tracked here so we can clean them up.
+        // ============================================================
+
+        var routeLayer = null;   // the drawn polyline
+        var moradaMarker = null;   // the fixed origin pin (set by jumpToAddress / setMoradaMarker)
+        var stopMarkers = [];     // array of Leaflet markers for the multi-stop list
+        var isBusy = false;  // prevents races between async calls
+        
+        // ============================================================
+        // ERROR HANDLING - Send errors to C# host
+        // ============================================================
+        function sendErrorToHost(error, context = {}) {
+            // Format error for C# consumption
+            var errorData = {
+                message: error.message || String(error),
+                stack: error.stack || 'No stack trace',
+                context: context,
+                timestamp: new Date().toISOString()
+            };
+            
+            // Expose to C# via window object
+            if (window.onMapError) {
+                window.onMapError(JSON.stringify(errorData));
+            }
+            
+            // Also log to console for debugging
+            console.error('Map Error:', errorData);
+        }============================================================
         // MAP SETUP
         // ============================================================
 
@@ -49,7 +115,9 @@
         // Remove the route polyline from the map.
         function _clearRouteLayer() {
             if (routeLayer) {
-                try { map.removeLayer(routeLayer); } catch (e) { }
+                try { map.removeLayer(routeLayer); } catch (e) {
+                    sendErrorToHost(e, { function: '_clearRouteLayer', layerType: 'route' });
+                }
                 routeLayer = null;
             }
         }
@@ -57,7 +125,9 @@
         // Remove all stop markers (does NOT touch moradaMarker).
         function _clearStopMarkers() {
             stopMarkers.forEach(function (m) {
-                try { map.removeLayer(m); } catch (e) { }
+                try { map.removeLayer(m); } catch (e) {
+                    sendErrorToHost(e, { function: '_clearStopMarkers', layerType: 'stopMarker' });
+                }
             });
             stopMarkers = [];
         }
@@ -65,7 +135,9 @@
         // Remove the origin (morada) marker.
         function _clearMoradaMarker() {
             if (moradaMarker) {
-                try { map.removeLayer(moradaMarker); } catch (e) { }
+                try { map.removeLayer(moradaMarker); } catch (e) {
+                    sendErrorToHost(e, { function: '_clearMoradaMarker', layerType: 'moradaMarker' });
+                }
                 moradaMarker = null;
             }
         }
@@ -217,9 +289,15 @@
         // Shared implementation for both ordered and optimal routing.
         async function _runRouting(stopsJson, optimise) {
             isBusy = true;
-            _clearRouteLayer();
-            _clearStopMarkers();
-            _clearMoradaMarker();
+            try {
+                _clearRouteLayer();
+                _clearStopMarkers();
+                _clearMoradaMarker();
+            } catch (e) {
+                sendErrorToHost(e, { function: '_runRouting', phase: 'cleanup' });
+                isBusy = false;
+                return;
+            }
 
             try {
                 // Accept either a JSON string (from C#) or a plain JS array.
@@ -304,11 +382,24 @@
                 }
 
             } catch (err) {
-                console.error('_runRouting error', { message: err.message, stack: err.stack });
+                sendErrorToHost(err, { 
+                    function: '_runRouting', 
+                    phase: 'main', 
+                    stopsCount: stops ? stops.length : 0,
+                    optimise: optimise 
+                });
             } finally {
                 isBusy = false;
             }
         }
+
+        // ============================================================
+        // EXPOSE ERROR HANDLER TO C#
+        // ============================================================
+        window.onMapError = function(errorJson) {
+            // This will be overridden by C# to receive error notifications
+            console.log('C# not listening for errors. Error:', errorJson);
+        };
 
 
         // ============================================================
@@ -368,7 +459,9 @@
         function setDestinationMarker(lat, lon, popupText) {
             // Remove the first stop marker if present
             if (stopMarkers.length > 0) {
-                try { map.removeLayer(stopMarkers[0]); } catch (e) { }
+                try { map.removeLayer(stopMarkers[0]); } catch (e) {
+                    sendErrorToHost(e, { function: 'setDestinationMarker', action: 'removeExisting' });
+                }
                 stopMarkers.splice(0, 1);
             }
             var m = L.marker([lat, lon]).addTo(map);
@@ -384,7 +477,9 @@
         // Clear only the first stop marker (legacy "destination" concept).
         function clearDestinationMarker() {
             if (stopMarkers.length > 0) {
-                try { map.removeLayer(stopMarkers[0]); } catch (e) { }
+                try { map.removeLayer(stopMarkers[0]); } catch (e) {
+                    sendErrorToHost(e, { function: 'clearDestinationMarker', markerIndex: 0 });
+                }
                 stopMarkers.splice(0, 1);
             }
         }
@@ -410,6 +505,7 @@
         window.clearAllAddressMarkers = clearAllAddressMarkers;
         window.setMoradaMarker = setMoradaMarker;
         window.setDestinationMarker = setDestinationMarker;
+        window.onMapError = onMapError;  // Expose error handler for C# to override
 
     </script>
 
