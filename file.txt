@@ -1,1 +1,43 @@
-Hello, World!
+
+
+X.Org X Server 1.21.1.21
+X Protocol Version 11, Revision 0
+Current Operating System: Linux void-live 6.12.11_1 #1 SMP PREEMPT_DYNAMIC Fri Jan 24 14:02:23 UTC 2025 x86_64
+ 
+Current version of pixman: 0.46.4
+	Before reporting problems, check http://wiki.x.org
+	to make sure that you have the latest version.
+Markers: (--) probed, (**) from config file, (==) default setting,
+	(++) from command line, (!!) notice, (II) informational,
+	(WW) warning, (EE) error, (NI) not implemented, (??) unknown.
+(==) Log file: "/var/log/Xorg.0.log", Time: Tue Mar 17 16:25:57 2026
+(==) Using system config directory "/usr/share/X11/xorg.conf.d"
+(EE) 
+(EE) Backtrace:
+(EE) 0: /usr/libexec/Xorg (xorg_backtrace+0x7e) [0x55c9fa9d4efe]
+(EE) 1: /usr/libexec/Xorg (0x55c9fa889000+0x1573e9) [0x55c9fa9e03e9]
+(EE) 2: /usr/lib64/libc.so.6 (0x7fe00f9cb000+0x40110) [0x7fe00fa0b110]
+(EE) 3: /usr/lib64/libc.so.6 (__getdelim+0x11) [0x7fe00fa45051]
+(EE) 4: /usr/libexec/Xorg (0x55c9fa889000+0x1aa9b3) [0x55c9faa339b3]
+(EE) 5: /usr/libexec/Xorg (InitOutput+0x1e67) [0x55c9fa9ff5a7]
+(EE) 6: /usr/libexec/Xorg (0x55c9fa889000+0x3bb84) [0x55c9fa8c4b84]
+(EE) 7: /usr/lib64/libc.so.6 (0x7fe00f9cb000+0x2abfc) [0x7fe00f9f5bfc]
+(EE) 8: /usr/lib64/libc.so.6 (__libc_start_main+0x85) [0x7fe00f9f5cb5]
+(EE) 9: /usr/libexec/Xorg (_start+0x21) [0x55c9fa8c6011]
+(EE) 
+(EE) Segmentation fault at address 0x0
+(EE) 
+Fatal server error:
+(EE) Caught signal 11 (Segmentation fault). Server aborting
+(EE) 
+(EE) 
+Please consult the The X.Org Foundation support 
+	 at http://wiki.x.org
+ for help. 
+(EE) Please also check the log file at "/var/log/Xorg.0.log" for additional information.
+(EE) 
+(EE) Server terminated with error (1). Closing log file.
+xinit: giving up
+xinit: unable to connect to X server: Connection refused
+xinit: server error
+Couldn't get a file descriptor referring to the console.
