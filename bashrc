@@ -38,12 +38,12 @@ alias neofetch="fastfetch && echo ''"
 
 # Helper: enter full vdb environment
 
-alias vdb="sudo xbps-uunshare -r /mnt/vdb"
+alias vdb="sudo xbps-uunshare -b /dev -b /proc -b /sys -b /run /mnt/vdb /bin/bash"
 
 # Optional: quick start X inside vdb
 
-startx_vdb() {
-sudo xbps-uunshare -r /mnt/vdb startx
+function startx_vdb() {
+sudo xbps-uunshare -b /dev -b /proc -b /sys -b /run /mnt/vdb /bin/bash -c "startx"
 }
 
 # Tmux / X prompt
@@ -56,7 +56,7 @@ case $choice in
 exec tmux
 ;;
 2)
-exec sudo xbps-uunshare -r /mnt/vdb startx
+startx_vdb
 ;;
 *)
 echo "ok."
