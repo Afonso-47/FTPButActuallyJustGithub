@@ -2,6 +2,8 @@
 #
 # pfetch - Simple POSIX sh fetch script.
 
+echo "DEBUG: this is ~/.local/bin/pfetch" >> /tmp/pfetch_debug.log
+
 log() {
     # The 'log()' function handles the printing of information.
     # In 'pfetch' (and 'neofetch'!) the printing of the ascii art and info
@@ -921,10 +923,16 @@ get_palette() {
 
 get_ascii() {
 
-	if [[ -f "$HOME/.config/pfetch.ascii" ]]; then
-		ascii="$(<"$HOME/.config/pfetch.ascii")"
-		return
-	fi
+	echo "DEBUG: HOME: $HOME" >> /tmp/pfetch_debug.log
+	echo "DEBUG: FILE EXISTS: $([ -f "$HOME/.config/pfetch.ascii" ] && echo yes || echo no)" >> /tmp/pfetch_debug.log
+
+	if [ -f "$HOME/.config/pfetch.ascii" ]; then
+		echo "DEBUG: loading custom ascii" >> /tmp/pfetch_debug.log
+		while IFS= read -r line; do
+			ascii="$ascii$line
+"
+		done < "$HOME/.config/pfetch.ascii"
+	else
 
     # This is a simple function to read the contents of
     # an ascii file from 'stdin'. It allows for the use
@@ -1425,6 +1433,8 @@ get_ascii() {
         ;;
     esac
 
+	fi
+
     # Store the "width" (longest line) and "height" (number of lines)
     # of the ascii art for positioning. This script prints to the screen
     # *almost* like a TUI does. It uses escape sequences to allow dynamic
@@ -1538,6 +1548,11 @@ main() {
 
         # Add an additional space of length to act as a gap.
         info_length=$((info_length + 1))
+
+	for info; do
+		echo "DEBUG: calling get_$info" >&2
+		"get_$info"
+	done
 
         # Iterate over the above list and run any existing "get_" functions.
         for info; do "get_$info"; done
